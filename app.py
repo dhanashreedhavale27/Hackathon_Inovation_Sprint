@@ -32,7 +32,7 @@ if api_key:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods and ('gemini' in m.name or 'gemma' in m.name):
                 clean_name = m.name.split('/')[-1]
-                if "3.5" in clean_name:
+                if any(v in clean_name for v in ["3.5", "2.5", "2.0", "gemini-2-"]):
                     supported_models.append(clean_name)
         supported_models.sort()
         # Find best default model
@@ -40,11 +40,28 @@ if api_key:
             if "3.5-flash" in model_name:
                 default_index = idx
                 break
+        else:
+            for idx, model_name in enumerate(supported_models):
+                if "2.5-flash" in model_name:
+                    default_index = idx
+                    break
+            else:
+                for idx, model_name in enumerate(supported_models):
+                    if "2.0-flash" in model_name:
+                        default_index = idx
+                        break
     except Exception as e:
         pass
 
 if not supported_models:
-    supported_models = ["gemini-3.5-flash", "gemini-3.5-pro"]
+    supported_models = [
+        "gemini-3.5-flash", 
+        "gemini-3.5-pro", 
+        "gemini-2.5-flash", 
+        "gemini-2.5-pro", 
+        "gemini-2.0-flash", 
+        "gemini-2.0-pro"
+    ]
     default_index = 0
 
 # Load Logo Image & Convert to Base64 for inline HTML rendering
