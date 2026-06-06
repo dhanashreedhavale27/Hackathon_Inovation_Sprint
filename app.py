@@ -1,5 +1,4 @@
 import streamlit as st
-import google.generativeai as genai
 import os
 import io
 import csv
@@ -13,56 +12,25 @@ from PIL import Image
 from pypdf import PdfReader
 import docx
 from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
 
 # Load local environment variables if present
 load_dotenv(override=True)
 
-# Configure Gemini API Key
-api_key = os.getenv("GEMINI_API_KEY")
-if api_key == "your_gemini_api_key_here" or not api_key:
-    api_key = None
-else:
-    genai.configure(api_key=api_key)
+# Configure Hugging Face token
+hf_token = os.getenv("HF_TOKEN")
+if hf_token == "your_hf_token_here" or not hf_token:
+    hf_token = None
 
-# Dynamically fetch available models based on API key permissions
-supported_models = []
+# Define Llama models supported via HF API
+supported_models = [
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    "meta-llama/Meta-Llama-3-70B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct"
+]
 default_index = 0
-if api_key:
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods and ('gemini' in m.name or 'gemma' in m.name):
-                clean_name = m.name.split('/')[-1]
-                if any(v in clean_name for v in ["3.5", "2.5", "2.0", "gemini-2-"]):
-                    supported_models.append(clean_name)
-        supported_models.sort()
-        # Find best default model
-        for idx, model_name in enumerate(supported_models):
-            if "3.5-flash" in model_name:
-                default_index = idx
-                break
-        else:
-            for idx, model_name in enumerate(supported_models):
-                if "2.5-flash" in model_name:
-                    default_index = idx
-                    break
-            else:
-                for idx, model_name in enumerate(supported_models):
-                    if "2.0-flash" in model_name:
-                        default_index = idx
-                        break
-    except Exception as e:
-        pass
 
-if not supported_models:
-    supported_models = [
-        "gemini-3.5-flash", 
-        "gemini-3.5-pro", 
-        "gemini-2.5-flash", 
-        "gemini-2.5-pro", 
-        "gemini-2.0-flash", 
-        "gemini-2.0-pro"
-    ]
-    default_index = 0
 
 # Load Logo Image & Convert to Base64 for inline HTML rendering
 logo_path = "e:/Hackathon/image.jpeg"
@@ -347,14 +315,10 @@ def process_uploaded_file(uploaded_file):
         text = file_bytes.decode('utf-8', errors='ignore')
     elif file_type == 'pdf':
         text = extract_text_from_pdf(file_bytes)
-        native_part = {"mime_type": "application/pdf", "data": file_bytes}
     elif file_type == 'docx':
         text = extract_text_from_docx(file_bytes)
     elif file_type == 'csv':
         text = extract_text_from_csv(file_bytes)
-    elif file_type in ['png', 'jpg', 'jpeg', 'webp']:
-        text = f"[Image File: {name}] - visual parsing supported."
-        native_part = {"mime_type": f"image/{'jpeg' if file_type=='jpg' else file_type}", "data": file_bytes}
     else:
         text = f"Unsupported file type: {file_type}"
         
@@ -716,8 +680,8 @@ if not st.session_state["messages"]:
         st.markdown("<h1 class='app-header'>NexaBot</h1>", unsafe_allow_html=True)
         st.markdown("<p class='app-subheader'>Next-Gen Multi-Modal AI Document Scanner & Chatbot</p>", unsafe_allow_html=True)
 
-    if not api_key:
-        st.warning("**Gemini API Key is missing or using placeholder value.** Please open the `.env` file in the project directory, add your `GEMINI_API_KEY`, and refresh this page.")
+    if not hf_token:
+        st.warning("Hugging Face Token is missing or using placeholder value. Please open the `.env` file in the project directory, add your `HF_TOKEN`, and refresh this page.")
 
     # Quick Action Suggestions
     st.markdown("### Quick Actions & Prompts")
@@ -742,10 +706,10 @@ for msg in st.session_state["messages"]:
         
 # Document Attachment (Pin Style)
 if not st.session_state["messages"]:
-    st.markdown("##### Attach Documents / Images for Scanning")
+    st.markdown("##### Attach Documents for Scanning")
     uploaded_files = st.file_uploader(
         "Upload files for scanning",
-        type=['pdf', 'docx', 'txt', 'csv', 'png', 'jpg', 'jpeg'],
+        type=['pdf', 'docx', 'txt', 'csv'],
         accept_multiple_files=True,
         label_visibility="collapsed"
     )
@@ -780,16 +744,13 @@ if prompt := st.chat_input("Ask about your documents, analyze images, or query g
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         
-        # Verify API Key
-        if not api_key:
-            response_placeholder.error("Gemini API Key not configured. Please set `GEMINI_API_KEY` in your `.env` file in the project folder and restart the app.")
-            st.session_state["messages"].append({"role": "assistant", "content": "Error: Missing Gemini API Key in `.env` file."})
+        # Verify Hugging Face Token
+        if not hf_token:
+            response_placeholder.error("Hugging Face API Token not configured. Please set `HF_TOKEN` in your `.env` file in the project folder and restart the app.")
+            st.session_state["messages"].append({"role": "assistant", "content": "Error: Missing HF_TOKEN in `.env` file."})
         else:
             with st.spinner("NexaBot is thinking..."):
                 try:
-                    # Initialize Model
-                    model = genai.GenerativeModel(model_choice)
-                    
                     # Decide Context usage based on Mode
                     chat_mode = st.session_state["chat_mode"]
                     active_files = st.session_state["uploaded_files"]
@@ -823,10 +784,13 @@ if prompt := st.chat_input("Ask about your documents, analyze images, or query g
                                 - For greetings, general questions (e.g., math, science, history), or meta-questions, respond with NO.
                                 - Only respond with YES if the query specifically asks about the contents, details, or summaries of the uploaded files.
                                 
-                                Respond with exactly YES or NO. If YES, list the files that are needed, separated by commas (e.g. YES: doc1.pdf, doc2.png).
+                                Respond with exactly YES or NO. If YES, list the files that are needed, separated by commas (e.g. YES: doc1.pdf, doc2.txt).
                                 """
-                                decider_model = genai.GenerativeModel(model_choice)
-                                decision_res = decider_model.generate_content(decision_prompt).text.strip().upper()
+                                client = InferenceClient(model_choice, token=hf_token)
+                                decision_res = client.chat_completion(
+                                    messages=[{"role": "user", "content": decision_prompt}],
+                                    max_tokens=20
+                                ).choices[0].message.content.strip().upper()
                                 
                                 st.write(f"*Agent Router analysis: `{decision_res}`*")
                                 
@@ -843,86 +807,68 @@ if prompt := st.chat_input("Ask about your documents, analyze images, or query g
                         else:
                             use_docs = False
                     
-                    # Build Gemini Request Content
-                    contents = []
+                    # Build Llama-3 Request Messages
+                    messages = []
                     
-                    if use_docs and active_files:
-                        files_to_inject = selected_files_info if selected_files_info else list(active_files.keys())
-                        
-                        document_context = "--- SCANNED DOCUMENTS CONTEXT ---\n"
-                        image_or_pdf_parts = []
-                        
-                        for fname in files_to_inject:
-                            file_data = active_files[fname]
-                            # If it's a native part (like Image or PDF visual), we can pass it directly to Gemini
-                            if file_data["native_part"] is not None:
-                                image_or_pdf_parts.append(file_data["native_part"])
-                                document_context += f"[Visual File Attached: {fname} (Gemini is reading it natively)]\n"
-                            else:
-                                document_context += f"\n--- Start Document: {fname} ---\n"
-                                document_context += file_data["text"]
-                                document_context += f"\n--- End Document: {fname} ---\n"
-                                
-                        document_context += "\nUse the scanned document details above to answer the user's prompt. If the answer cannot be found in the documents, state that clearly, but try to answer using general reasoning if appropriate."
-                        
-                        # Set instructions
-                        contents.append(document_context)
-                        
-                        # Add any visual parts (like images or PDF bytes)
-                        for part in image_or_pdf_parts:
-                            contents.append(part)
-                            
-                    # Chat History
-                    # For a stateful multi-turn conversation, we can supply the past messages.
-                    # To prevent context window explosion and keep it simple, we supply the recent history.
-                    chat_context = ""
-                    if len(st.session_state["messages"]) > 1:
-                        chat_context = "--- RECENT CHAT HISTORY ---\n"
-                        for prev_msg in st.session_state["messages"][:-1]:
-                            chat_context += f"{prev_msg['role'].capitalize()}: {prev_msg['content']}\n"
-                        chat_context += "---------------------------\n"
-                        contents.append(chat_context)
-                    
-                    # Add current prompt
-                    contents.append(f"User Query: {prompt}")
-                    
-                    # Inject System Instructions
+                    # System Instructions
                     system_instruction = """
-                    You are NexaBot, a highly advanced Multi-Modal AI Document Scanner and Chatbot.
-                    Your goal is to scan documents, extract information, visual details, text, and answer user queries with high accuracy.
+                    You are NexaBot, a highly advanced AI Document Scanner and Chatbot.
+                    Your goal is to scan documents, extract information, text, and answer user queries with high accuracy.
                     - If document context is provided, ground your answers in the document context. Extract tables, keys, and values.
-                    - If images/PDFs are attached natively, inspect them carefully. Check charts, layout, diagrams, and handwriting.
                     - Be helpful, concise, and professional. 
                     - Use markdown styling for structure (e.g. bold, bullet points, tables, code blocks).
                     - If the user asks a general query (not about documents), answer it using your general knowledge in a creative, helpful way.
                     """
+                    messages.append({"role": "system", "content": system_instruction})
                     
-                    # Run Generation
-                    # Set system instruction
-                    full_model = genai.GenerativeModel(
-                        model_name=model_choice,
-                        system_instruction=system_instruction
+                    # Inject Document Context
+                    if use_docs and active_files:
+                        files_to_inject = selected_files_info if selected_files_info else list(active_files.keys())
+                        
+                        document_context = "--- SCANNED DOCUMENTS CONTEXT ---\n"
+                        for fname in files_to_inject:
+                            file_data = active_files[fname]
+                            document_context += f"\n--- Start Document: {fname} ---\n"
+                            document_context += file_data["text"]
+                            document_context += f"\n--- End Document: {fname} ---\n"
+                                
+                        document_context += "\nUse the scanned document details above to answer the user's prompt. If the answer cannot be found in the documents, state that clearly, but try to answer using general reasoning if appropriate."
+                        messages.append({"role": "system", "content": document_context})
+                    
+                    # Inject Chat History
+                    for prev_msg in st.session_state["messages"][:-1]:
+                        role = "assistant" if prev_msg["role"] == "assistant" else "user"
+                        messages.append({"role": role, "content": prev_msg["content"]})
+                    
+                    # Add current prompt
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    # Run Generation via Hugging Face Client
+                    client = InferenceClient(model_choice, token=hf_token)
+                    response = client.chat_completion(
+                        messages=messages,
+                        max_tokens=1024,
+                        temperature=0.7
                     )
-                    
-                    response = full_model.generate_content(contents)
+                    answer = response.choices[0].message.content
                     
                     # Render response
-                    response_placeholder.markdown(response.text)
-                    st.session_state["messages"].append({"role": "assistant", "content": response.text})
+                    response_placeholder.markdown(answer)
+                    st.session_state["messages"].append({"role": "assistant", "content": answer})
                     save_chat(st.session_state["current_chat_id"], st.session_state["chat_title"], st.session_state["messages"])
                     
                 except Exception as e:
                     err_msg = str(e)
-                    if "429" in err_msg or "quota" in err_msg.lower():
+                    if "429" in err_msg or "quota" in err_msg.lower() or "limit" in err_msg.lower():
                         friendly_error = (
-                            f"Quota Exceeded for model: {model_choice}\n\n"
-                            "You have reached the free tier limits for the current model. "
-                            "Please select a different model (such as Gemini 2.5 Flash, Gemini 2.5 Pro, or Gemini 2 Flash) in the Settings sidebar to continue chatting without delay!"
+                            f"Rate Limit Exceeded for Hugging Face endpoint: {model_choice}\n\n"
+                            "You have reached the inference API rate limits. "
+                            "Please wait a moment or try another model in the Settings sidebar."
                         )
                         response_placeholder.warning(friendly_error)
                         st.session_state["messages"].append({"role": "assistant", "content": friendly_error})
                     else:
-                        response_placeholder.error(f"Error calling Gemini API: {err_msg}")
+                        response_placeholder.error(f"Error calling Hugging Face Inference API: {err_msg}")
                         st.session_state["messages"].append({"role": "assistant", "content": f"An error occurred: {err_msg}"})
                     save_chat(st.session_state["current_chat_id"], st.session_state["chat_title"], st.session_state["messages"])
 
