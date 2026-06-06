@@ -912,8 +912,18 @@ if prompt := st.chat_input("Ask about your documents, analyze images, or query g
                     save_chat(st.session_state["current_chat_id"], st.session_state["chat_title"], st.session_state["messages"])
                     
                 except Exception as e:
-                    response_placeholder.error(f"Error calling Gemini API: {str(e)}")
-                    st.session_state["messages"].append({"role": "assistant", "content": f"An error occurred: {str(e)}"})
+                    err_msg = str(e)
+                    if "429" in err_msg or "quota" in err_msg.lower():
+                        friendly_error = (
+                            f"Quota Exceeded for model: {model_choice}\n\n"
+                            "You have reached the free tier limits for the current model. "
+                            "Please select a different model (such as Gemini 2.5 Flash, Gemini 2.5 Pro, or Gemini 2 Flash) in the Settings sidebar to continue chatting without delay!"
+                        )
+                        response_placeholder.warning(friendly_error)
+                        st.session_state["messages"].append({"role": "assistant", "content": friendly_error})
+                    else:
+                        response_placeholder.error(f"Error calling Gemini API: {err_msg}")
+                        st.session_state["messages"].append({"role": "assistant", "content": f"An error occurred: {err_msg}"})
                     save_chat(st.session_state["current_chat_id"], st.session_state["chat_title"], st.session_state["messages"])
 
 # Clear Chat History Button
